@@ -1,0 +1,23 @@
+TELEGRAM GRUPO -> TEMAS POR HASHTAG (SOLO PYTHON)
+
+FLUJO:
+1) Revisa el grupo ORIGEN.
+2) Solo procesa mensajes que tengan VIDEO + #HASHTAG.
+3) Descarga cada video TEMPORALMENTE en la carpeta temp.
+4) En el grupo DESTINO crea/reutiliza un TEMA con el nombre del hashtag.
+5) Sube el video desde el archivo temporal al tema.
+6) Borra el video temporal inmediatamente despues.
+7) Si un video tiene varios hashtags, lo envia a cada tema correspondiente.
+8) Los videos sin hashtag se ignoran.
+
+INSTALAR:
+  py -m pip install -r requirements.txt
+
+EJECUTAR:
+  py main.py
+
+IMPORTANTE:
+- El grupo DESTINO debe tener TEMAS activados.
+- La cuenta usada debe poder crear temas y enviar videos.
+- Los videos NO quedan guardados localmente al terminar.
+- data/enviados.json solo guarda IDs para evitar duplicados; no contiene videos.
