@@ -4,215 +4,113 @@ import asyncio
 import getpass
 import json
 import mimetypes
-import os
 import re
 import shutil
-import sys
 import unicodedata
 from pathlib import Path
 from urllib.parse import urlparse
 
 from telethon import TelegramClient, errors, functions, utils
 
-try:
-    import keyring
-except Exception:
-    keyring = None
-
-
 APP_NAME = "TelegramVideoManager"
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
-CONFIG_PATH = DATA_DIR / "config.json"
 SENT_PATH = DATA_DIR / "enviados.json"
 SESSION_PATH = str(DATA_DIR / "telegram_session")
 TEMP_DIR = BASE_DIR / "temp"
 
 DATA_DIR.mkdir(exist_ok=True)
 
-DEFAULT_CONFIG = {
-    "api_id": "",
-    "phone": "",
-    "source_group": "",
-    "destination_group": "",
-    "create_topics": True,
-    "keep_caption": True,
-    "skip_already_sent": True,
-    "destination_confirmed": False,
-}
+# ============================================================
+# CONFIGURACION DIRECTA - EDITA SOLO ESTA PARTE
+# ============================================================
+# API ID: solo numeros, obtenido en my.telegram.org
+API_ID = 35724071
+
+# API HASH: exactamente 32 caracteres. NO es el token de BotFather.
+API_HASH = "bacca344d0a2b2b6f46f0f96fc06363b"
+
+# Telefono de la cuenta, con codigo de pais.
+PHONE = "+51918356277"
+
+# Puedes poner ID -100..., @usuario o enlace t.me
+GRUPO_ORIGEN = -1003929455385
+GRUPO_DESTINO = -1004308171647
+
+# Opciones del proceso
+CREAR_TEMAS = True
+CONSERVAR_TEXTO = True
+SALTAR_YA_ENVIADOS = True
+
+# Dejalo vacio para procesar TODOS los hashtags.
+# Ejemplo para uno solo: SOLO_HASHTAG = "VeneciaLopez"
+SOLO_HASHTAG = ""
 
 
 # ============================================================
-# CONFIGURACION
+# VALIDACION DE LA CONFIGURACION
 # ============================================================
 
-def load_config() -> dict:
-    data = DEFAULT_CONFIG.copy()
-    if CONFIG_PATH.exists():
-        try:
-            saved = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
-            if isinstance(saved, dict):
-                data.update(saved)
-        except Exception:
-            pass
-    return data
-
-
-def save_config(data: dict) -> None:
-    current = load_config()
-    current.update(data)
-    CONFIG_PATH.write_text(
-        json.dumps(current, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-
-
-def _api_hash_key(api_id: str | int) -> str:
-    return f"api_hash:{str(api_id).strip()}"
-
-
-def load_api_hash(api_id: str | int = "") -> str:
-    """Carga el API Hash asociado al API ID actual.
-
-    Se evita reutilizar un hash viejo de otro API ID, que provoca
-    ApiIdInvalidError al iniciar sesion.
-    """
-    env_value = os.getenv("TELEGRAM_API_HASH", "").strip()
-    if env_value:
-        return env_value
-
-    api_id = str(api_id or "").strip()
-    if not api_id or keyring is None:
-        return ""
-
+def _validate_api_id(value) -> int:
     try:
-        return (keyring.get_password(APP_NAME, _api_hash_key(api_id)) or "").strip()
-    except Exception:
-        return ""
-
-
-def save_api_hash(api_id: str | int, value: str) -> None:
-    api_id = str(api_id or "").strip()
-    value = (value or "").strip()
-    if not api_id or not value:
-        return
-
-    if keyring is not None:
-        try:
-            keyring.set_password(APP_NAME, _api_hash_key(api_id), value)
-            # Borra la clave generica usada por versiones anteriores para no
-            # mezclar un API ID con un API Hash de otra aplicacion.
-            try:
-                keyring.delete_password(APP_NAME, "api_hash")
-            except Exception:
-                pass
-            return
-        except Exception:
-            pass
-
-    print("[AVISO] No pude guardar el API Hash en Credenciales de Windows.")
-    print("        Puedes usar la variable TELEGRAM_API_HASH.")
-
-
-def clear_api_hash(api_id: str | int) -> None:
-    api_id = str(api_id or "").strip()
-    if keyring is None or not api_id:
-        return
-    try:
-        keyring.delete_password(APP_NAME, _api_hash_key(api_id))
-    except Exception:
-        pass
-
-
-def _validate_api_id(value: str) -> str:
-    value = (value or "").strip()
-    if not value:
-        raise RuntimeError("Falta el API ID.")
-    if not value.isdigit():
-        raise RuntimeError("El API ID debe contener solamente numeros.")
-    if int(value) <= 0:
-        raise RuntimeError("El API ID no es valido.")
+        value = int(value)
+    except Exception as exc:
+        raise RuntimeError("API_ID debe ser un numero entero.") from exc
+    if value <= 0:
+        raise RuntimeError("Pon tu API_ID real arriba del archivo main.py.")
     return value
 
 
 def _validate_api_hash(value: str) -> str:
-    value = (value or "").strip()
-    if not value:
-        raise RuntimeError("Falta el API Hash.")
+    value = str(value or "").strip()
     if not re.fullmatch(r"[0-9a-fA-F]{32}", value):
         raise RuntimeError(
-            "El API Hash debe tener 32 caracteres hexadecimales. "
-            "Copia exactamente el API Hash de my.telegram.org."
+            "Pon tu API_HASH real de 32 caracteres arriba de main.py. "
+            "Debe pertenecer a la misma aplicacion que API_ID."
         )
     return value
 
 
-def configure() -> dict:
-    cfg = load_config()
+def _validate_phone(value: str) -> str:
+    value = str(value or "").strip()
+    if not value or "X" in value.upper():
+        raise RuntimeError("Pon tu PHONE real arriba de main.py, por ejemplo +51XXXXXXXXX.")
+    return value
 
-    print("\n=== CONFIGURACION DE TELEGRAM ===")
-    print("Usa el API ID y API Hash de LA MISMA aplicacion de my.telegram.org.")
-    print("ENTER conserva el valor actual cuando ya hay uno correcto.\n")
 
-    old_api_id = str(cfg.get("api_id", "") or "").strip()
-    api_id_input = input(f"API ID [{old_api_id or 'vacio'}]: ").strip()
-    api_id = _validate_api_id(api_id_input or old_api_id)
+def _validate_group(value, name: str):
+    value_text = str(value or "").strip()
+    if not value_text or value_text in {"0", "-1000000000000"}:
+        raise RuntimeError(f"Pon el {name} real arriba de main.py.")
+    return value
 
-    # El hash se busca por API ID. Si cambias el ID, nunca se reutiliza el
-    # hash guardado de otra aplicacion.
-    current_hash = load_api_hash(api_id)
-    api_hash_input = getpass.getpass(
-        f"API Hash [{'guardado para este API ID' if current_hash else 'vacio'}]: "
-    ).strip()
-    api_hash = _validate_api_hash(api_hash_input or current_hash)
 
-    old_phone = str(cfg.get("phone", "") or "")
-    phone = input(f"Telefono [{old_phone or 'vacio'}]: ").strip() or old_phone
-
-    old_source = str(cfg.get("source_group", "") or "")
-    source = input(
-        f"Grupo ORIGEN ID/@usuario/link [{old_source or 'vacio'}]: "
-    ).strip() or old_source
-
-    destination_confirmed = bool(cfg.get("destination_confirmed", False))
-    old_destination = (
-        str(cfg.get("destination_group", "") or "") if destination_confirmed else ""
-    )
-    destination = input(
-        f"Grupo DESTINO ID/@usuario/link [{old_destination or 'vacio'}]: "
-    ).strip() or old_destination
-
-    if not phone:
-        raise RuntimeError("Falta el telefono de Telegram.")
-
-    save_config({
-        "api_id": api_id,
-        "phone": phone,
-        "source_group": source,
-        "destination_group": destination,
-        "destination_confirmed": bool(destination),
-    })
-    save_api_hash(api_id, api_hash)
-
-    print("\n[OK] Configuracion guardada.")
-    return load_config()
+def load_config() -> dict:
+    return {
+        "api_id": API_ID,
+        "phone": PHONE,
+        "source_group": GRUPO_ORIGEN,
+        "destination_group": GRUPO_DESTINO,
+        "create_topics": CREAR_TEMAS,
+        "keep_caption": CONSERVAR_TEXTO,
+        "skip_already_sent": SALTAR_YA_ENVIADOS,
+        "destination_confirmed": True,
+    }
 
 
 def credentials() -> tuple[int, str, str]:
-    cfg = load_config()
-    api_id = str(cfg.get("api_id", "") or "").strip()
-    phone = str(cfg.get("phone", "") or "").strip()
-    api_hash = load_api_hash(api_id)
+    return (
+        _validate_api_id(API_ID),
+        _validate_api_hash(API_HASH),
+        _validate_phone(PHONE),
+    )
 
-    if not api_id or not api_hash or not phone:
-        cfg = configure()
-        api_id = str(cfg.get("api_id", "") or "").strip()
-        phone = str(cfg.get("phone", "") or "").strip()
-        api_hash = load_api_hash(api_id)
 
-    api_id = _validate_api_id(api_id)
-    api_hash = _validate_api_hash(api_hash)
-    return int(api_id), api_hash, phone
+def validate_direct_groups() -> tuple[object, object]:
+    return (
+        _validate_group(GRUPO_ORIGEN, "GRUPO_ORIGEN"),
+        _validate_group(GRUPO_DESTINO, "GRUPO_DESTINO"),
+    )
 
 
 # ============================================================
@@ -280,7 +178,17 @@ def parse_telegram_link(value: str):
 
 
 def normalize_chat_ref(value):
+    """Normaliza @usuario, links t.me e IDs numericos de Telegram.
+
+    Acepta tambien el error comun de escribir un ID de supergrupo como
+    1004308171647 (sin el signo menos) y lo convierte a -1004308171647.
+    """
     if isinstance(value, int):
+        # IDs de Bot API de supergrupos/canales empiezan por -100.
+        # Si el usuario lo pego como 100... sin '-', lo corregimos.
+        text = str(value)
+        if value > 0 and text.startswith("100") and len(text) >= 12:
+            return -value
         return value
 
     text = str(value or "").strip()
@@ -292,7 +200,10 @@ def normalize_chat_ref(value):
         return parsed[0]
 
     if re.fullmatch(r"-?\d+", text):
-        return int(text)
+        number = int(text)
+        if number > 0 and text.startswith("100") and len(text) >= 12:
+            return -number
+        return number
 
     if text.startswith("@"):
         return text[1:]
@@ -300,24 +211,94 @@ def normalize_chat_ref(value):
     return text
 
 
+def _numeric_chat_candidates(ref: int) -> list[int]:
+    """Genera variantes utiles para IDs pegados en distintos formatos."""
+    candidates: list[int] = []
+
+    def add(x):
+        if isinstance(x, int) and x not in candidates:
+            candidates.append(x)
+
+    add(ref)
+
+    # 1004308171647 -> -1004308171647
+    if ref > 0:
+        add(-ref)
+
+    digits = str(abs(ref))
+
+    # -1004308171647 / 1004308171647 -> raw channel id 4308171647
+    if digits.startswith("100") and len(digits) > 3:
+        try:
+            raw_id = int(digits[3:])
+            add(raw_id)
+        except ValueError:
+            pass
+
+    return candidates
+
+
 async def resolve_chat(client: TelegramClient, value):
     ref = normalize_chat_ref(value)
 
-    try:
-        return await client.get_entity(ref)
-    except Exception:
-        pass
+    # @usuario o enlace publico
+    if not isinstance(ref, int):
+        try:
+            return await client.get_entity(ref)
+        except Exception as exc:
+            raise RuntimeError(
+                f"No pude abrir el chat '{value}'. Verifica el @usuario/link y que tu cuenta tenga acceso. "
+                f"Detalle: {type(exc).__name__}: {exc}"
+            ) from exc
 
-    if isinstance(ref, int):
-        async for dialog in client.iter_dialogs():
-            try:
-                if utils.get_peer_id(dialog.entity) == ref:
-                    return dialog.entity
-            except Exception:
-                continue
+    candidates = _numeric_chat_candidates(ref)
+
+    # Primero intenta resolver directamente las distintas formas del ID.
+    for candidate in candidates:
+        try:
+            return await client.get_entity(candidate)
+        except Exception:
+            pass
+
+    # Si el ID no esta aun en la cache de Telethon, buscamos entre los
+    # dialogos de la cuenta y comparamos ID marcado (-100...) e ID crudo.
+    async for dialog in client.iter_dialogs(limit=None):
+        entity = dialog.entity
+        try:
+            marked_id = int(utils.get_peer_id(entity))
+        except Exception:
+            marked_id = None
+
+        try:
+            raw_id = int(getattr(entity, "id", 0) or 0)
+        except Exception:
+            raw_id = 0
+
+        for candidate in candidates:
+            if marked_id == candidate:
+                return entity
+
+            digits = str(abs(candidate))
+            if digits.startswith("100") and len(digits) > 3:
+                try:
+                    if raw_id == int(digits[3:]):
+                        return entity
+                except ValueError:
+                    pass
+
+            if candidate > 0 and raw_id == candidate:
+                return entity
+
+    shown = str(value).strip()
+    suggestion = ""
+    if re.fullmatch(r"\d+", shown) and shown.startswith("100"):
+        suggestion = f" Prueba tambien con -{shown}."
 
     raise RuntimeError(
-        f"No pude abrir el chat '{value}'. Verifica que tu cuenta tenga acceso."
+        f"No pude abrir el chat '{value}'.{suggestion} "
+        "Asegurate de que la cuenta con la que iniciaste sesion sea miembro del grupo. "
+        "Tambien puedes poner directamente un enlace del grupo/mensaje, por ejemplo "
+        "https://t.me/c/XXXXXXXXXX/123."
     )
 
 
@@ -984,49 +965,14 @@ async def send_entire_group(
 
 
 # ============================================================
-# MENU CMD / POWERSHELL
+# EJECUCION DIRECTA - NO PIDE IDs EN CONSOLA
 # ============================================================
 
-def print_header() -> None:
-    print("\n" + "=" * 66)
-    print(" TELEGRAM VIDEO COPIER - SOLO PYTHON / CMD / POWERSHELL")
-    print(" Grupo origen -> temas por #hashtag -> grupo destino")
-    print(" TEMPORAL: descarga -> envia -> borra")
-    print("=" * 66)
-
-
-def print_menu() -> None:
-    print("1. Buscar videos con #hashtag y enviarlos por temas")
-    print("2. Enviar videos de UN #hashtag")
-    print("3. Enviar UN video pegando su enlace")
-    print("4. Enviar DESDE un enlace hasta el ultimo mensaje")
-    print("5. Cambiar grupo origen / destino / configuracion")
-    print("6. Borrar registro de 'ya enviados'")
-    print("0. Salir")
-
-
-def ask_source(default: str) -> str:
-    value = input(
-        f"Grupo ORIGEN ID/@usuario/link [{default or 'sin configurar'}]: "
-    ).strip() or default
-    if not value:
-        raise RuntimeError("Falta indicar el grupo origen.")
-    return value
-
-
-def ask_destination(default: str) -> str:
-    value = input(
-        f"Grupo DESTINO ID/@usuario/link [{default or 'sin configurar'}]: "
-    ).strip() or default
-    if not value:
-        raise RuntimeError(
-            "Falta el grupo destino. Cuando tengas el ID, pegalo aqui."
-        )
-    return value
-
-
-async def interactive() -> None:
+async def main() -> None:
+    cleanup_temp_dir()
     api_id, api_hash, phone = credentials()
+    source_value, destination_value = validate_direct_groups()
+
     client = TelegramClient(
         SESSION_PATH,
         api_id,
@@ -1036,202 +982,42 @@ async def interactive() -> None:
         retry_delay=3,
     )
 
-    await ensure_login(client, phone)
-
     try:
-        while True:
-            print_header()
-            cfg = load_config()
-            print(f"Origen : {cfg.get('source_group') or '(ninguno)'}")
-            destination_saved = (
-                str(cfg.get("destination_group", "") or "")
-                if bool(cfg.get("destination_confirmed", False))
-                else ""
-            )
-            print(f"Destino: {destination_saved or '(pendiente de poner ID)'}\n")
-            print_menu()
+        # La primera vez Telegram si pedira el codigo de inicio de sesion.
+        # Despues queda guardada la sesion en data/telegram_session.session.
+        await ensure_login(client, phone)
 
-            option = input("\nElige una opcion: ").strip()
+        source = await resolve_chat(client, source_value)
+        destination = await resolve_chat(client, destination_value)
 
-            try:
-                if option == "1":
-                    source = ask_source(str(cfg.get("source_group", "") or ""))
-                    destination = ask_destination(
-                        str(cfg.get("destination_group", "") or "")
-                        if bool(cfg.get("destination_confirmed", False)) else ""
-                    )
-                    save_config({
-                        "source_group": source,
-                        "destination_group": destination,
-                        "destination_confirmed": True,
-                    })
-                    await send_entire_group(client, source, destination)
+        print("\n============================================================")
+        print(" TELEGRAM: ORIGEN -> #HASHTAG -> TEMA -> DESTINO")
+        print(" descarga temporal -> sube -> borra temporal")
+        print("============================================================")
+        print(f"ORIGEN : {chat_name(source)}")
+        print(f"DESTINO: {chat_name(destination)}")
+        if SOLO_HASHTAG.strip():
+            print(f"FILTRO : #{SOLO_HASHTAG.lstrip('#')}")
+        else:
+            print("FILTRO : TODOS LOS #HASHTAGS")
+        print("============================================================\n")
 
-                elif option == "2":
-                    source = ask_source(str(cfg.get("source_group", "") or ""))
-                    destination = ask_destination(
-                        str(cfg.get("destination_group", "") or "")
-                        if bool(cfg.get("destination_confirmed", False)) else ""
-                    )
-                    tag = input("Hashtag (ejemplo #VeneciaLopez): ").strip()
-                    if not tag:
-                        raise RuntimeError("Falta el hashtag.")
-                    save_config({
-                        "source_group": source,
-                        "destination_group": destination,
-                        "destination_confirmed": True,
-                    })
-                    await send_entire_group(client, source, destination, tag)
-
-                elif option == "3":
-                    destination = ask_destination(
-                        str(cfg.get("destination_group", "") or "")
-                        if bool(cfg.get("destination_confirmed", False)) else ""
-                    )
-                    link = input("Pega el enlace del video: ").strip()
-                    save_config({"destination_group": destination, "destination_confirmed": True})
-                    await send_one_link(client, link, destination)
-
-                elif option == "4":
-                    destination = ask_destination(
-                        str(cfg.get("destination_group", "") or "")
-                        if bool(cfg.get("destination_confirmed", False)) else ""
-                    )
-                    link = input("Pega el enlace INICIAL: ").strip()
-                    save_config({"destination_group": destination, "destination_confirmed": True})
-                    await send_from_link_to_end(client, link, destination)
-
-                elif option == "5":
-                    await client.disconnect()
-                    configure()
-                    api_id, api_hash, phone = credentials()
-                    client = TelegramClient(
-                        SESSION_PATH,
-                        api_id,
-                        api_hash,
-                        auto_reconnect=True,
-                        connection_retries=5,
-                        retry_delay=3,
-                    )
-                    await ensure_login(client, phone)
-
-                elif option == "6":
-                    answer = input(
-                        "Escribe SI para permitir reenviar videos anteriores: "
-                    ).strip().upper()
-                    if answer == "SI":
-                        if SENT_PATH.exists():
-                            SENT_PATH.unlink()
-                        print("[OK] Registro eliminado.")
-                    else:
-                        print("Cancelado.")
-
-                elif option == "0":
-                    print("Saliendo...")
-                    break
-
-                else:
-                    print("Opcion invalida.")
-
-            except KeyboardInterrupt:
-                print("\nOperacion cancelada.")
-            except Exception as exc:
-                print(f"\n[ERROR] {type(exc).__name__}: {exc}\n")
-
-            if option != "0":
-                input("Presiona ENTER para volver al menu...")
-
-    finally:
-        cleanup_temp_dir()
-        if client.is_connected():
-            await client.disconnect()
-
-
-async def command_mode(args: list[str]) -> bool:
-    """Comandos rapidos opcionales para PowerShell."""
-    if not args:
-        return False
-
-    cmd = args[0].lower()
-    if cmd not in {"grupo", "hashtag", "link", "desde"}:
-        return False
-
-    cfg = load_config()
-    destination = (
-        str(cfg.get("destination_group", "") or "").strip()
-        if bool(cfg.get("destination_confirmed", False)) else ""
-    )
-
-    # Permite: py main.py ... --destino -1001234567890
-    if "--destino" in args:
-        pos = args.index("--destino")
-        if pos + 1 >= len(args):
-            raise RuntimeError("Falta el ID despues de --destino")
-        destination = args[pos + 1]
-        args = args[:pos] + args[pos + 2:]
-        save_config({"destination_group": destination, "destination_confirmed": True})
-
-    if not destination:
-        raise RuntimeError(
-            "Falta el grupo destino. Ejecuta 'py main.py' o agrega "
-            "--destino -100XXXXXXXXXX"
+        await scan_and_send(
+            client,
+            source,
+            destination,
+            hashtag_filter=SOLO_HASHTAG,
+            reverse=True,
         )
 
-    api_id, api_hash, phone = credentials()
-    client = TelegramClient(SESSION_PATH, api_id, api_hash)
-    await ensure_login(client, phone)
-
-    try:
-        if cmd == "grupo":
-            if len(args) < 2:
-                raise RuntimeError(
-                    "Uso: py main.py grupo <ORIGEN> --destino <DESTINO>"
-                )
-            await send_entire_group(client, args[1], destination)
-
-        elif cmd == "hashtag":
-            if len(args) < 3:
-                raise RuntimeError(
-                    "Uso: py main.py hashtag <ORIGEN> <#hashtag> "
-                    "--destino <DESTINO>"
-                )
-            await send_entire_group(client, args[1], destination, args[2])
-
-        elif cmd == "link":
-            if len(args) < 2:
-                raise RuntimeError(
-                    "Uso: py main.py link <ENLACE> --destino <DESTINO>"
-                )
-            await send_one_link(client, args[1], destination)
-
-        elif cmd == "desde":
-            if len(args) < 2:
-                raise RuntimeError(
-                    "Uso: py main.py desde <ENLACE> --destino <DESTINO>"
-                )
-            await send_from_link_to_end(client, args[1], destination)
-
-        return True
-
+    except KeyboardInterrupt:
+        print("\nCancelado por el usuario.")
+    except Exception as exc:
+        print(f"\n[ERROR] {type(exc).__name__}: {exc}")
     finally:
         cleanup_temp_dir()
         if client.is_connected():
             await client.disconnect()
-
-
-async def main() -> None:
-    cleanup_temp_dir()
-    try:
-        handled = await command_mode(sys.argv[1:])
-        if not handled:
-            await interactive()
-    except KeyboardInterrupt:
-        print("\nCancelado.")
-    except Exception as exc:
-        print(f"\n[ERROR] {type(exc).__name__}: {exc}")
-        print("Ejecuta: py main.py")
-    finally:
-        cleanup_temp_dir()
 
 
 if __name__ == "__main__":
