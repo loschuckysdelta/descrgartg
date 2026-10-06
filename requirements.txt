@@ -1,2 +1,0 @@
-telethon>=1.36,<2.0
-keyring>=25,<27
